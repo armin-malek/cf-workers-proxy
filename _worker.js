@@ -56,15 +56,44 @@ class AttributeRewriter {
   }
 
   element(el) {
-    const attrs = ["href", "src", "action"]
+    const attrs = [
+      "href",
+      "src",
+      "action",
+      "srcset",
+      "data-src",
+      "data-original",
+      "data-lazy",
+      "data-srcset",
+      "poster"
+    ]
 
     for (const attr of attrs) {
       const val = el.getAttribute(attr)
       if (!val) continue
 
-      const newUrl = proxifyUrl(this.workerOrigin, this.baseUrl, val)
+      // handle srcset separately (multiple urls)
+      if (attr === "srcset" || attr === "data-srcset") {
+        const parts = val.split(",").map(part => {
+          const [url, size] = part.trim().split(" ")
+          try {
+            const absolute = new URL(url, this.baseUrl).href
+            return `${this.workerOrigin}/${absolute} ${size || ""}`.trim()
+          } catch {
+            return part
+          }
+        })
 
-      el.setAttribute(attr, newUrl)
+        el.setAttribute(attr, parts.join(", "))
+        continue
+      }
+
+      try {
+        const absolute = new URL(val, this.baseUrl).href
+        el.setAttribute(attr, `${this.workerOrigin}/${absolute}`)
+      } catch {
+        // ignore invalid urls
+      }
     }
   }
 }
