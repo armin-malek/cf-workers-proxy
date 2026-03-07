@@ -35,8 +35,13 @@ function rewriteHeaders(headers) {
   return newHeaders
 }
 
+// ---------------------------
+// Proxify URLs safely
+// ---------------------------
 function proxifyUrl(workerOrigin, baseUrl, value) {
   try {
+    // Skip if already proxied
+    if (value.startsWith(workerOrigin)) return value
     const absolute = new URL(value, baseUrl).href
     return `${workerOrigin}/${absolute}`
   } catch {
@@ -45,9 +50,8 @@ function proxifyUrl(workerOrigin, baseUrl, value) {
 }
 
 // ---------------------------
-// HTMLRewriter for absolute URLs
+// HTMLRewriter for attributes
 // ---------------------------
-
 class AttributeRewriter {
   constructor(workerOrigin, baseUrl) {
     this.workerOrigin = workerOrigin
@@ -56,11 +60,10 @@ class AttributeRewriter {
 
   element(el) {
     const attrs = [
-      "href", "src", "action", "srcset",
-      "data-src", "data-original", "data-lazy",
-      "data-srcset", "poster"
+      "href","src","action","srcset",
+      "data-src","data-original","data-lazy",
+      "data-srcset","poster"
     ]
-
     for (const attr of attrs) {
       const val = el.getAttribute(attr)
       if (!val) continue
@@ -70,6 +73,7 @@ class AttributeRewriter {
           const [url, size] = part.trim().split(" ")
           try {
             const absolute = new URL(url, this.baseUrl).href
+            if (absolute.startsWith(this.workerOrigin)) return part
             return `${this.workerOrigin}/${absolute} ${size || ""}`.trim()
           } catch {
             return part
@@ -87,26 +91,24 @@ class AttributeRewriter {
 // ---------------------------
 // JS injection for dynamic requests
 // ---------------------------
-
 const injectedJS = `(function(){
 const workerOrigin = location.origin;
 const _fetch = window.fetch;
-window.fetch = function(url, ...args){
-  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url=\`\${workerOrigin}/\${new URL(url, location.href).href}\`; }
-  else if(url instanceof Request && !url.url.startsWith(workerOrigin)){ url = new Request(\`\${workerOrigin}/\${url.url}\`, url);}
-  return _fetch(url, ...args);
+window.fetch = function(url,...args){
+  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url=\`\${workerOrigin}/\${new URL(url,location.href).href}\`; }
+  else if(url instanceof Request && !url.url.startsWith(workerOrigin)){ url = new Request(\`\${workerOrigin}/\${url.url}\`,url);}
+  return _fetch(url,...args);
 };
 const _open = XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open = function(method, url, ...rest){
-  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url = \`\${workerOrigin}/\${new URL(url, location.href).href}\`; }
-  return _open.call(this, method, url, ...rest);
+XMLHttpRequest.prototype.open = function(method,url,...rest){
+  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url=\`\${workerOrigin}/\${new URL(url,location.href).href}\`; }
+  return _open.call(this,method,url,...rest);
 };
 })();`
 
 // ---------------------------
 // Worker entry point
 // ---------------------------
-
 export default {
   async fetch(request) {
     try {
@@ -120,7 +122,8 @@ export default {
 
       // rewrite redirects
       const location = headers.get("location")
-      if (location) headers.set("location", `${workerUrl.origin}/${new URL(location, targetUrl).href}`)
+      if (location && !location.startsWith(workerUrl.origin))
+        headers.set("location", `${workerUrl.origin}/${new URL(location, targetUrl).href}`)
 
       const contentType = headers.get("content-type") || ""
 
@@ -139,9 +142,7 @@ export default {
         .on("iframe", new AttributeRewriter(workerUrl.origin, targetUrl))
         .on("source", new AttributeRewriter(workerUrl.origin, targetUrl))
         .on("head", {
-          element(el) {
-            el.append(`<script>${injectedJS}</script>`, { html: true })
-          }
+          element(el) { el.append(`<script>${injectedJS}</script>`, { html: true }) }
         })
 
       return rewriter.transform(new Response(response.body, { status: response.status, headers }))
