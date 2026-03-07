@@ -1,51 +1,49 @@
 // ---------------------------
 // Helper functions
 // ---------------------------
-
 function extractTarget(request) {
-  const url = new URL(request.url)
-  const raw = url.pathname.slice(1)
-  if (!raw.startsWith("http://") && !raw.startsWith("https://")) return null
-  const target = new URL(raw)
-  target.search = url.search
-  return target
+  const url = new URL(request.url);
+  const raw = url.pathname.slice(1);
+  if (!raw.startsWith("http://") && !raw.startsWith("https://")) return null;
+  const target = new URL(raw);
+  target.search = url.search;
+  return target;
 }
 
 function createProxyRequest(request, targetUrl) {
-  const headers = new Headers(request.headers)
-  headers.set("host", targetUrl.host)
-  headers.set("origin", targetUrl.origin)
-  headers.delete("cf-connecting-ip")
-  headers.delete("cf-ipcountry")
-  headers.delete("cf-ray")
+  const headers = new Headers(request.headers);
+  headers.set("host", targetUrl.host);
+  headers.set("origin", targetUrl.origin);
+  headers.delete("cf-connecting-ip");
+  headers.delete("cf-ipcountry");
+  headers.delete("cf-ray");
   return new Request(targetUrl.toString(), {
     method: request.method,
     headers,
     body: request.body,
     redirect: "manual"
-  })
+  });
 }
 
 function rewriteHeaders(headers) {
-  const newHeaders = new Headers(headers)
-  newHeaders.delete("content-security-policy")
-  newHeaders.delete("content-security-policy-report-only")
-  newHeaders.delete("x-frame-options")
-  newHeaders.delete("strict-transport-security")
-  return newHeaders
+  const newHeaders = new Headers(headers);
+  newHeaders.delete("content-security-policy");
+  newHeaders.delete("content-security-policy-report-only");
+  newHeaders.delete("x-frame-options");
+  newHeaders.delete("strict-transport-security");
+  return newHeaders;
 }
 
 // ---------------------------
-// Proxify URLs safely
+// Safe URL proxifier
 // ---------------------------
 function proxifyUrl(workerOrigin, baseUrl, value) {
   try {
-    // Skip if already proxied
-    if (value.startsWith(workerOrigin)) return value
-    const absolute = new URL(value, baseUrl).href
-    return `${workerOrigin}/${absolute}`
+    if (value.startsWith(workerOrigin)) return value; // already proxied
+    const absolute = new URL(value, baseUrl).href;
+    return `${workerOrigin}/${absolute}`;
   } catch {
-    return value
+    return value;
   }
 }
 
@@ -54,8 +52,8 @@ function proxifyUrl(workerOrigin, baseUrl, value) {
 // ---------------------------
 class AttributeRewriter {
   constructor(workerOrigin, baseUrl) {
-    this.workerOrigin = workerOrigin
-    this.baseUrl = baseUrl
+    this.workerOrigin = workerOrigin;
+    this.baseUrl = baseUrl;
   }
 
   element(el) {
@@ -63,27 +61,27 @@ class AttributeRewriter {
       "href","src","action","srcset",
       "data-src","data-original","data-lazy",
       "data-srcset","poster"
-    ]
+    ];
     for (const attr of attrs) {
-      const val = el.getAttribute(attr)
-      if (!val) continue
+      const val = el.getAttribute(attr);
+      if (!val) continue;
 
       if (attr === "srcset" || attr === "data-srcset") {
         const parts = val.split(",").map(part => {
-          const [url, size] = part.trim().split(" ")
+          const [url, size] = part.trim().split(" ");
           try {
-            const absolute = new URL(url, this.baseUrl).href
-            if (absolute.startsWith(this.workerOrigin)) return part
-            return `${this.workerOrigin}/${absolute} ${size || ""}`.trim()
+            const absolute = new URL(url, this.baseUrl).href;
+            if (absolute.startsWith(this.workerOrigin)) return part;
+            return `${this.workerOrigin}/${absolute} ${size || ""}`.trim();
           } catch {
-            return part
+            return part;
           }
-        })
-        el.setAttribute(attr, parts.join(", "))
-        continue
+        });
+        el.setAttribute(attr, parts.join(", "));
+        continue;
       }
 
-      el.setAttribute(attr, proxifyUrl(this.workerOrigin, this.baseUrl, val))
+      el.setAttribute(attr, proxifyUrl(this.workerOrigin, this.baseUrl, val));
     }
   }
 }
@@ -91,20 +89,30 @@ class AttributeRewriter {
 // ---------------------------
 // JS injection for dynamic requests
 // ---------------------------
-const injectedJS = `(function(){
+function getInjectedJS(targetOrigin) {
+  return `(function(){
 const workerOrigin = location.origin;
+const targetOrigin = '${targetOrigin}';
 const _fetch = window.fetch;
 window.fetch = function(url,...args){
-  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url=\`\${workerOrigin}/\${new URL(url,location.href).href}\`; }
-  else if(url instanceof Request && !url.url.startsWith(workerOrigin)){ url = new Request(\`\${workerOrigin}/\${url.url}\`,url);}
+  if(typeof url==="string" && !url.startsWith(workerOrigin)){
+    try{url=new URL(url,targetOrigin).href}catch{}
+    url=\`\${workerOrigin}/\${url}\`;
+  } else if(url instanceof Request && !url.url.startsWith(workerOrigin)){
+    try{const u=new URL(url.url,targetOrigin).href; url=new Request(\`\${workerOrigin}/\${u}\`,url);}catch{}
+  }
   return _fetch(url,...args);
 };
-const _open = XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open = function(method,url,...rest){
-  if(typeof url==="string" && !url.startsWith(workerOrigin)){ url=\`\${workerOrigin}/\${new URL(url,location.href).href}\`; }
+const _open=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(method,url,...rest){
+  if(typeof url==="string" && !url.startsWith(workerOrigin)){
+    try{url=new URL(url,targetOrigin).href}catch{}
+    url=\`\${workerOrigin}/\${url}\`;
+  }
   return _open.call(this,method,url,...rest);
 };
-})();`
+})();`;
+}
 
 // ---------------------------
 // Worker entry point
@@ -112,24 +120,24 @@ XMLHttpRequest.prototype.open = function(method,url,...rest){
 export default {
   async fetch(request) {
     try {
-      const workerUrl = new URL(request.url)
-      const targetUrl = extractTarget(request)
-      if (!targetUrl) return new Response("Usage: /https://example.com", { status: 400 })
+      const workerUrl = new URL(request.url);
+      const targetUrl = extractTarget(request);
+      if (!targetUrl) return new Response("Usage: /https://example.com", { status: 400 });
 
-      const proxyRequest = createProxyRequest(request, targetUrl)
-      const response = await fetch(proxyRequest)
-      const headers = rewriteHeaders(response.headers)
+      const proxyRequest = createProxyRequest(request, targetUrl);
+      const response = await fetch(proxyRequest);
+      const headers = rewriteHeaders(response.headers);
 
       // rewrite redirects
-      const location = headers.get("location")
+      const location = headers.get("location");
       if (location && !location.startsWith(workerUrl.origin))
-        headers.set("location", `${workerUrl.origin}/${new URL(location, targetUrl).href}`)
+        headers.set("location", `${workerUrl.origin}/${new URL(location,targetUrl).href}`);
 
-      const contentType = headers.get("content-type") || ""
+      const contentType = headers.get("content-type") || "";
 
-      // Non-HTML assets (images, CSS, JS, fonts, video)
+      // Non-HTML assets
       if (!contentType.includes("text/html")) {
-        return new Response(response.body, { status: response.status, headers })
+        return new Response(response.body, { status: response.status, headers });
       }
 
       // HTML rewriting + JS injection
@@ -142,12 +150,12 @@ export default {
         .on("iframe", new AttributeRewriter(workerUrl.origin, targetUrl))
         .on("source", new AttributeRewriter(workerUrl.origin, targetUrl))
         .on("head", {
-          element(el) { el.append(`<script>${injectedJS}</script>`, { html: true }) }
-        })
+          element(el) { el.append(`<script>${getInjectedJS(targetUrl.origin)}</script>`, { html: true }) }
+        });
 
-      return rewriter.transform(new Response(response.body, { status: response.status, headers }))
+      return rewriter.transform(new Response(response.body, { status: response.status, headers }));
     } catch (err) {
-      return new Response("Proxy error: " + err.message, { status: 500 })
+      return new Response("Proxy error: " + err.message, { status: 500 });
     }
   }
-}
+};
