@@ -37,10 +37,10 @@ function rewriteHeaders(headers) {
 // ---------------------------
 // Safe URL proxifier
 // ---------------------------
-function proxifyUrl(workerOrigin, baseUrl, value) {
+function proxifyUrl(workerOrigin, targetUrl, value) {
   try {
     if (value.startsWith(workerOrigin)) return value; // already proxied
-    const absolute = new URL(value, baseUrl).href;
+    const absolute = new URL(value, targetUrl.origin).href; // ⚡ target origin used here
     return `${workerOrigin}/${absolute}`;
   } catch {
     return value;
