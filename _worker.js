@@ -3,7 +3,7 @@
 // ---------------------------
 function extractTarget(request) {
   const url = new URL(request.url);
-  const raw = url.pathname.slice(1); // remove leading '/'
+  const raw = url.pathname.slice(1);
   if (!raw.startsWith("http://") && !raw.startsWith("https://")) return null;
   const target = new URL(raw);
   target.search = url.search;
@@ -35,12 +35,11 @@ function rewriteHeaders(headers) {
 }
 
 // ---------------------------
-// Safe URL proxifier
+// Convert any URL to proxied URL
 // ---------------------------
 function proxifyUrl(workerOrigin, targetUrl, value) {
   try {
     if (value.startsWith(workerOrigin)) return value; // already proxied
-    // Resolve relative URLs using full original page URL, not just origin
     const absolute = new URL(value, targetUrl.href).href;
     return `${workerOrigin}/${absolute}`;
   } catch {
@@ -66,39 +65,33 @@ class AttributeRewriter {
     for (const attr of attrs) {
       const val = el.getAttribute(attr);
       if (!val) continue;
-
       if (attr === "srcset" || attr === "data-srcset") {
         const parts = val.split(",").map(part => {
           const [url, size] = part.trim().split(" ");
           try {
             const absolute = new URL(url, this.targetUrl.href).href;
             if (absolute.startsWith(this.workerOrigin)) return part;
-            return `${this.workerOrigin}/${absolute} ${size || ""}`.trim();
+            return `${this.workerOrigin}/${absolute} ${size||""}`.trim();
           } catch {
             return part;
           }
         });
-        el.setAttribute(attr, parts.join(", "));
+        el.setAttribute(attr, parts.join(","));
         continue;
       }
-
       el.setAttribute(attr, proxifyUrl(this.workerOrigin, this.targetUrl, val));
     }
   }
 }
 
 // ---------------------------
-// JS injection for dynamic content
+// Inject JS for dynamic content / AJAX
 // ---------------------------
 function getInjectedJS() {
   return `(function(){
 const workerOrigin = location.origin;
-
-// Determine the original target page URL
-let targetUrl = null;
-const match = location.pathname.match(/^\\/https?:\\/\\/[^\\/]+(\\/.*)?/);
-if(match) targetUrl = new URL(match[0].slice(1));
-else targetUrl = new URL(location.href);
+let pathMatch = location.pathname.match(/^\\/https?:\\/\\/[^\\/]+(\\/.*)?/);
+let targetUrl = pathMatch ? new URL(pathMatch[0].slice(1)) : new URL(location.href);
 
 function proxify(el, attrs){
   attrs.forEach(attr=>{
@@ -123,10 +116,10 @@ function proxify(el, attrs){
 }
 
 // Initial rewrite
-const attrs = ['href','src','action','srcset','data-src','data-original','data-lazy','data-srcset','poster'];
+const attrs=['href','src','action','srcset','data-src','data-original','data-lazy','data-srcset','poster'];
 document.querySelectorAll('*').forEach(el=>proxify(el, attrs));
 
-// Observe dynamic DOM additions
+// Observe DOM changes
 const observer = new MutationObserver(mutations=>{
   for(const m of mutations){
     m.addedNodes.forEach(node=>{
@@ -163,16 +156,16 @@ XMLHttpRequest.prototype.open=function(method,url,...rest){
 }
 
 // ---------------------------
-// Worker entry point
+// Worker entry
 // ---------------------------
 export default {
   async fetch(request) {
     try {
       const workerUrl = new URL(request.url);
       const targetUrl = extractTarget(request);
-      if(!targetUrl) return new Response("Usage: /https://example.com", {status:400});
+      if(!targetUrl) return new Response("Usage: /https://example.com",{status:400});
 
-      const proxyRequest = createProxyRequest(request, targetUrl);
+      const proxyRequest = createProxyRequest(request,targetUrl);
       const response = await fetch(proxyRequest);
       const headers = rewriteHeaders(response.headers);
 
@@ -181,14 +174,14 @@ export default {
       if(locationHeader && !locationHeader.startsWith(workerUrl.origin))
         headers.set("location", `${workerUrl.origin}/${new URL(locationHeader,targetUrl).href}`);
 
-      const contentType = headers.get("content-type") || "";
+      const contentType = headers.get("content-type")||"";
 
       // Non-HTML assets
-      if(!contentType.includes("text/html")) {
-        return new Response(response.body,{status:response.status, headers});
+      if(!contentType.includes("text/html")){
+        return new Response(response.body,{status:response.status,headers});
       }
 
-      // HTML rewriting + dynamic JS injection
+      // HTML + dynamic JS injection
       const rewriter = new HTMLRewriter()
         .on("a", new AttributeRewriter(workerUrl.origin,targetUrl))
         .on("img", new AttributeRewriter(workerUrl.origin,targetUrl))
@@ -197,13 +190,11 @@ export default {
         .on("form", new AttributeRewriter(workerUrl.origin,targetUrl))
         .on("iframe", new AttributeRewriter(workerUrl.origin,targetUrl))
         .on("source", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("head",{
-          element(el){ el.append(`<script>${getInjectedJS()}</script>`,{html:true}) }
-        });
+        .on("head",{element(el){ el.append(`<script>${getInjectedJS()}</script>`,{html:true}) }});
 
-      return rewriter.transform(new Response(response.body,{status:response.status, headers}));
+      return rewriter.transform(new Response(response.body,{status:response.status,headers}));
 
-    } catch(err) {
+    } catch(err){
       return new Response("Proxy error: "+err.message,{status:500});
     }
   }
