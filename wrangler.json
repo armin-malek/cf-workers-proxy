@@ -5,13 +5,13 @@
   "workers_dev": true,
 
   "vars": {
-    "PROXY_HOSTNAME": "fapello.com",
+    "PROXY_HOSTNAME": "web.telegram.org",
     "PATHNAME_REGEX": ".*",
     "UA_WHITELIST_REGEX": ".*",
     "IP_WHITELIST": "",
     "IP_BLACKLIST": "",
     "COUNTRY_WHITELIST": "",
     "COUNTRY_BLACKLIST": "",
-    "URL302": "https://fapello.com"
+    "URL302": "https://web.telegram.org/"
   }
 }
