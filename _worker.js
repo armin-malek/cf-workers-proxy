@@ -3,7 +3,7 @@
 // ---------------------------
 function extractTarget(request) {
   const url = new URL(request.url);
-  const raw = url.pathname.slice(1); // remove leading "/"
+  const raw = url.pathname.slice(1); // remove leading '/'
   if (!raw.startsWith("http://") && !raw.startsWith("https://")) return null;
   const target = new URL(raw);
   target.search = url.search;
@@ -40,7 +40,8 @@ function rewriteHeaders(headers) {
 function proxifyUrl(workerOrigin, targetUrl, value) {
   try {
     if (value.startsWith(workerOrigin)) return value; // already proxied
-    const absolute = new URL(value, targetUrl.origin).href; // relative → absolute using original site
+    // Resolve relative URLs using full original page URL, not just origin
+    const absolute = new URL(value, targetUrl.href).href;
     return `${workerOrigin}/${absolute}`;
   } catch {
     return value;
@@ -70,7 +71,7 @@ class AttributeRewriter {
         const parts = val.split(",").map(part => {
           const [url, size] = part.trim().split(" ");
           try {
-            const absolute = new URL(url, this.targetUrl.origin).href;
+            const absolute = new URL(url, this.targetUrl.href).href;
             if (absolute.startsWith(this.workerOrigin)) return part;
             return `${this.workerOrigin}/${absolute} ${size || ""}`.trim();
           } catch {
@@ -87,60 +88,64 @@ class AttributeRewriter {
 }
 
 // ---------------------------
-// JS injection for dynamic content / AJAX
+// JS injection for dynamic content
 // ---------------------------
 function getInjectedJS() {
   return `(function(){
 const workerOrigin = location.origin;
 
-// Function to rewrite element URLs dynamically
-function proxify(el, attrs, targetOrigin){
+// Determine the original target page URL
+let targetUrl = null;
+const match = location.pathname.match(/^\\/https?:\\/\\/[^\\/]+(\\/.*)?/);
+if(match) targetUrl = new URL(match[0].slice(1));
+else targetUrl = new URL(location.href);
+
+function proxify(el, attrs){
   attrs.forEach(attr=>{
     const val = el.getAttribute(attr);
     if(!val) return;
     if(attr==='srcset'||attr==='data-srcset'){
       const parts = val.split(',').map(p=>{
         const [url,size]=p.trim().split(' ');
-        try{ const abs=new URL(url,targetOrigin).href; return abs.startsWith(workerOrigin)?p:\`\${workerOrigin}/\${abs} \${size||''}\`.trim(); }catch{return p;}
+        try{
+          const abs=new URL(url,targetUrl.href).href;
+          return abs.startsWith(workerOrigin)?p:\`\${workerOrigin}/\${abs} \${size||''}\`.trim();
+        }catch{return p;}
       });
       el.setAttribute(attr, parts.join(','));
-    } else {
-      try{ const abs=new URL(val,targetOrigin).href; if(!val.startsWith(workerOrigin)) el.setAttribute(attr,\`\${workerOrigin}/\${abs}\`); }catch{}
+    }else{
+      try{
+        const abs=new URL(val,targetUrl.href).href;
+        if(!val.startsWith(workerOrigin)) el.setAttribute(attr,\`\${workerOrigin}/\${abs}\`);
+      }catch{}
     }
   });
 }
 
-// Observe mutations
-function observeDOM(targetOrigin){
-  const attrs = ['href','src','action','srcset','data-src','data-original','data-lazy','data-srcset','poster'];
-  document.querySelectorAll('*').forEach(el=>proxify(el, attrs, targetOrigin));
-  const observer = new MutationObserver(mutations=>{
-    for(const m of mutations){
-      m.addedNodes.forEach(node=>{
-        if(node.nodeType!==1) return;
-        proxify(node, attrs, targetOrigin);
-        node.querySelectorAll('*').forEach(el=>proxify(el, attrs, targetOrigin));
-      })
-    }
-  });
-  observer.observe(document.body,{childList:true,subtree:true});
-}
+// Initial rewrite
+const attrs = ['href','src','action','srcset','data-src','data-original','data-lazy','data-srcset','poster'];
+document.querySelectorAll('*').forEach(el=>proxify(el, attrs));
 
-// Determine target origin dynamically from <base> tag or window.location.pathname
-let targetOrigin=null;
-const pathMatch = location.pathname.match(/^\\/https?:\\/\\/[^\\/]+/);
-if(pathMatch) targetOrigin=pathMatch[0].slice(1);
-else targetOrigin=window.location.origin;
-observeDOM(targetOrigin);
+// Observe dynamic DOM additions
+const observer = new MutationObserver(mutations=>{
+  for(const m of mutations){
+    m.addedNodes.forEach(node=>{
+      if(node.nodeType!==1) return;
+      proxify(node, attrs);
+      node.querySelectorAll('*').forEach(el=>proxify(el, attrs));
+    });
+  }
+});
+observer.observe(document.body,{childList:true,subtree:true});
 
 // Intercept fetch
 const _fetch=window.fetch;
 window.fetch=function(url,...args){
   if(typeof url==='string' && !url.startsWith(workerOrigin)){
-    try{url=new URL(url,targetOrigin).href}catch{}
+    try{ url=new URL(url,targetUrl.href).href }catch{}
     url=\`\${workerOrigin}/\${url}\`;
   }else if(url instanceof Request && !url.url.startsWith(workerOrigin)){
-    try{const u=new URL(url.url,targetOrigin).href; url=new Request(\`\${workerOrigin}/\${u}\`,url);}catch{}
+    try{ const u=new URL(url.url,targetUrl.href).href; url=new Request(\`\${workerOrigin}/\${u}\`,url);}catch{}
   }
   return _fetch(url,...args);
 };
@@ -149,7 +154,7 @@ window.fetch=function(url,...args){
 const _open=XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open=function(method,url,...rest){
   if(typeof url==='string' && !url.startsWith(workerOrigin)){
-    try{url=new URL(url,targetOrigin).href}catch{}
+    try{ url=new URL(url,targetUrl.href).href }catch{}
     url=\`\${workerOrigin}/\${url}\`;
   }
   return _open.call(this,method,url,...rest);
@@ -183,7 +188,7 @@ export default {
         return new Response(response.body,{status:response.status, headers});
       }
 
-      // HTML rewriting + JS injection
+      // HTML rewriting + dynamic JS injection
       const rewriter = new HTMLRewriter()
         .on("a", new AttributeRewriter(workerUrl.origin,targetUrl))
         .on("img", new AttributeRewriter(workerUrl.origin,targetUrl))
