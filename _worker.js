@@ -40,24 +40,31 @@ function rewriteHeaders(headers) {
   return newHeaders
 }
 
+function proxifyUrl(workerOrigin, baseUrl, value) {
+  try {
+    const absolute = new URL(value, baseUrl).href
+    return `${workerOrigin}/${absolute}`
+  } catch {
+    return value
+  }
+}
+
 class AttributeRewriter {
-  constructor(workerOrigin) {
+  constructor(workerOrigin, baseUrl) {
     this.workerOrigin = workerOrigin
+    this.baseUrl = baseUrl
   }
 
-  element(element) {
+  element(el) {
     const attrs = ["href", "src", "action"]
 
     for (const attr of attrs) {
-      const val = element.getAttribute(attr)
-
+      const val = el.getAttribute(attr)
       if (!val) continue
 
-      if (val.startsWith("http://") || val.startsWith("https://")) {
-        element.setAttribute(attr, `${this.workerOrigin}/${val}`)
-      } else if (val.startsWith("/")) {
-        element.setAttribute(attr, `${this.workerOrigin}${val}`)
-      }
+      const newUrl = proxifyUrl(this.workerOrigin, this.baseUrl, val)
+
+      el.setAttribute(attr, newUrl)
     }
   }
 }
@@ -82,9 +89,18 @@ export default {
 
       const headers = rewriteHeaders(response.headers)
 
+      // rewrite redirects
+      const location = headers.get("location")
+      if (location) {
+        headers.set(
+          "location",
+          `${workerUrl.origin}/${new URL(location, targetUrl).href}`
+        )
+      }
+
       const contentType = headers.get("content-type") || ""
 
-      // Binary assets (images, fonts, video, etc)
+      // non HTML assets (images/css/js/fonts)
       if (!contentType.includes("text/html")) {
         return new Response(response.body, {
           status: response.status,
@@ -92,13 +108,14 @@ export default {
         })
       }
 
-      // HTML rewriting
       const rewriter = new HTMLRewriter()
-        .on("a", new AttributeRewriter(workerUrl.origin))
-        .on("img", new AttributeRewriter(workerUrl.origin))
-        .on("script", new AttributeRewriter(workerUrl.origin))
-        .on("link", new AttributeRewriter(workerUrl.origin))
-        .on("form", new AttributeRewriter(workerUrl.origin))
+        .on("a", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("img", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("script", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("link", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("form", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("iframe", new AttributeRewriter(workerUrl.origin, targetUrl))
+        .on("source", new AttributeRewriter(workerUrl.origin, targetUrl))
 
       return rewriter.transform(
         new Response(response.body, {
@@ -106,7 +123,6 @@ export default {
           headers
         })
       )
-
     } catch (err) {
       return new Response("Proxy error: " + err.message, { status: 500 })
     }
