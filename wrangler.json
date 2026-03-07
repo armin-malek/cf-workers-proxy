@@ -1,0 +1,17 @@
+{
+  "name": "cf-workers-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2026-03-07",
+  "workers_dev": true,
+
+  "vars": {
+    "PROXY_HOSTNAME": "fapello.com",
+    "PATHNAME_REGEX": ".*",
+    "UA_WHITELIST_REGEX": ".*",
+    "IP_WHITELIST": "",
+    "IP_BLACKLIST": "",
+    "COUNTRY_WHITELIST": "",
+    "COUNTRY_BLACKLIST": "",
+    "URL302": "https://fapello.com"
+  }
+}
