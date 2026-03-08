@@ -17,6 +17,7 @@ function createProxyRequest(request, targetUrl) {
   headers.delete("cf-connecting-ip");
   headers.delete("cf-ipcountry");
   headers.delete("cf-ray");
+
   return new Request(targetUrl.toString(), {
     method: request.method,
     headers,
@@ -35,12 +36,46 @@ function rewriteHeaders(headers) {
 }
 
 // ---------------------------
+// Convert ANY url to absolute
+// ---------------------------
+function toAbsolute(targetUrl, value) {
+  try {
+    if (!value) return null;
+
+    value = value.trim();
+
+    if (value.startsWith("data:")) return value;
+    if (value.startsWith("javascript:")) return value;
+    if (value.startsWith("#")) return value;
+
+    // protocol-relative
+    if (value.startsWith("//")) {
+      return `${targetUrl.protocol}${value}`;
+    }
+
+    // already absolute
+    if (value.startsWith("http://") || value.startsWith("https://")) {
+      return new URL(value).href;
+    }
+
+    // relative → absolute
+    return new URL(value, targetUrl.origin).href;
+
+  } catch {
+    return value;
+  }
+}
+
+// ---------------------------
 // Convert any URL to proxied URL
 // ---------------------------
 function proxifyUrl(workerOrigin, targetUrl, value) {
   try {
-    if (value.startsWith(workerOrigin)) return value; // already proxied
-    const absolute = new URL(value, targetUrl.href).href;
+    const absolute = toAbsolute(targetUrl, value);
+    if (!absolute) return value;
+
+    if (absolute.startsWith(workerOrigin)) return absolute;
+
     return `${workerOrigin}/${absolute}`;
   } catch {
     return value;
@@ -62,24 +97,33 @@ class AttributeRewriter {
       "data-src","data-original","data-lazy",
       "data-srcset","poster"
     ];
+
     for (const attr of attrs) {
       const val = el.getAttribute(attr);
       if (!val) continue;
+
       if (attr === "srcset" || attr === "data-srcset") {
         const parts = val.split(",").map(part => {
           const [url, size] = part.trim().split(" ");
-          try {
-            const absolute = new URL(url, this.targetUrl.href).href;
-            if (absolute.startsWith(this.workerOrigin)) return part;
-            return `${this.workerOrigin}/${absolute} ${size||""}`.trim();
-          } catch {
-            return part;
-          }
+
+          const absolute = toAbsolute(this.targetUrl, url);
+          if (!absolute) return part;
+
+          const proxied = absolute.startsWith(this.workerOrigin)
+            ? absolute
+            : `${this.workerOrigin}/${absolute}`;
+
+          return `${proxied}${size ? " " + size : ""}`;
         });
+
         el.setAttribute(attr, parts.join(","));
         continue;
       }
-      el.setAttribute(attr, proxifyUrl(this.workerOrigin, this.targetUrl, val));
+
+      el.setAttribute(
+        attr,
+        proxifyUrl(this.workerOrigin, this.targetUrl, val)
+      );
     }
   }
 }
@@ -88,70 +132,105 @@ class AttributeRewriter {
 // Inject JS for dynamic content / AJAX
 // ---------------------------
 function getInjectedJS() {
-  return `(function(){
+return `(function(){
+
 const workerOrigin = location.origin;
 let pathMatch = location.pathname.match(/^\\/https?:\\/\\/[^\\/]+(\\/.*)?/);
 let targetUrl = pathMatch ? new URL(pathMatch[0].slice(1)) : new URL(location.href);
 
-function proxify(el, attrs){
+function toAbsolute(value){
+  try{
+    if(!value) return null;
+
+    value=value.trim();
+
+    if(value.startsWith('data:')||value.startsWith('javascript:')||value.startsWith('#'))
+      return value;
+
+    if(value.startsWith('//'))
+      return targetUrl.protocol + value;
+
+    if(value.startsWith('http://')||value.startsWith('https://'))
+      return new URL(value).href;
+
+    return new URL(value,targetUrl.origin).href;
+
+  }catch{return value;}
+}
+
+function proxify(el,attrs){
   attrs.forEach(attr=>{
-    const val = el.getAttribute(attr);
+    const val=el.getAttribute(attr);
     if(!val) return;
+
     if(attr==='srcset'||attr==='data-srcset'){
-      const parts = val.split(',').map(p=>{
+      const parts=val.split(',').map(p=>{
         const [url,size]=p.trim().split(' ');
-        try{
-          const abs=new URL(url,targetUrl.href).href;
-          return abs.startsWith(workerOrigin)?p:\`\${workerOrigin}/\${abs} \${size||''}\`.trim();
-        }catch{return p;}
+        const abs=toAbsolute(url);
+        if(!abs) return p;
+
+        const prox=abs.startsWith(workerOrigin)?abs:\`\${workerOrigin}/\${abs}\`;
+        return \`\${prox}\${size?' '+size:''}\`;
       });
-      el.setAttribute(attr, parts.join(','));
-    }else{
-      try{
-        const abs=new URL(val,targetUrl.href).href;
-        if(!val.startsWith(workerOrigin)) el.setAttribute(attr,\`\${workerOrigin}/\${abs}\`);
-      }catch{}
+
+      el.setAttribute(attr,parts.join(','));
+      return;
     }
+
+    const abs=toAbsolute(val);
+    if(!abs) return;
+
+    if(!abs.startsWith(workerOrigin))
+      el.setAttribute(attr,\`\${workerOrigin}/\${abs}\`);
   });
 }
 
-// Initial rewrite
 const attrs=['href','src','action','srcset','data-src','data-original','data-lazy','data-srcset','poster'];
-document.querySelectorAll('*').forEach(el=>proxify(el, attrs));
 
-// Observe DOM changes
-const observer = new MutationObserver(mutations=>{
+document.querySelectorAll('*').forEach(el=>proxify(el,attrs));
+
+const observer=new MutationObserver(mutations=>{
   for(const m of mutations){
     m.addedNodes.forEach(node=>{
       if(node.nodeType!==1) return;
-      proxify(node, attrs);
-      node.querySelectorAll('*').forEach(el=>proxify(el, attrs));
+      proxify(node,attrs);
+      node.querySelectorAll('*').forEach(el=>proxify(el,attrs));
     });
   }
 });
+
 observer.observe(document.body,{childList:true,subtree:true});
 
-// Intercept fetch
 const _fetch=window.fetch;
 window.fetch=function(url,...args){
-  if(typeof url==='string' && !url.startsWith(workerOrigin)){
-    try{ url=new URL(url,targetUrl.href).href }catch{}
-    url=\`\${workerOrigin}/\${url}\`;
-  }else if(url instanceof Request && !url.url.startsWith(workerOrigin)){
-    try{ const u=new URL(url.url,targetUrl.href).href; url=new Request(\`\${workerOrigin}/\${u}\`,url);}catch{}
-  }
+
+  try{
+    if(typeof url==='string'){
+      const abs=toAbsolute(url);
+      if(abs && !abs.startsWith(workerOrigin))
+        url=\`\${workerOrigin}/\${abs}\`;
+    }
+
+    if(url instanceof Request){
+      const abs=toAbsolute(url.url);
+      if(abs && !abs.startsWith(workerOrigin))
+        url=new Request(\`\${workerOrigin}/\${abs}\`,url);
+    }
+  }catch{}
+
   return _fetch(url,...args);
 };
 
-// Intercept XMLHttpRequest
 const _open=XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open=function(method,url,...rest){
-  if(typeof url==='string' && !url.startsWith(workerOrigin)){
-    try{ url=new URL(url,targetUrl.href).href }catch{}
-    url=\`\${workerOrigin}/\${url}\`;
-  }
+  try{
+    const abs=toAbsolute(url);
+    if(abs && !abs.startsWith(workerOrigin))
+      url=\`\${workerOrigin}/\${abs}\`;
+  }catch{}
   return _open.call(this,method,url,...rest);
 };
+
 })();`;
 }
 
@@ -163,38 +242,48 @@ export default {
     try {
       const workerUrl = new URL(request.url);
       const targetUrl = extractTarget(request);
-      if(!targetUrl) return new Response("Usage: /https://example.com",{status:400});
+
+      if (!targetUrl)
+        return new Response("Usage: /https://example.com",{status:400});
 
       const proxyRequest = createProxyRequest(request,targetUrl);
       const response = await fetch(proxyRequest);
       const headers = rewriteHeaders(response.headers);
 
-      // Rewrite redirects
       const locationHeader = headers.get("location");
-      if(locationHeader && !locationHeader.startsWith(workerUrl.origin))
-        headers.set("location", `${workerUrl.origin}/${new URL(locationHeader,targetUrl).href}`);
-
-      const contentType = headers.get("content-type")||"";
-
-      // Non-HTML assets
-      if(!contentType.includes("text/html")){
-        return new Response(response.body,{status:response.status,headers});
+      if (locationHeader && !locationHeader.startsWith(workerUrl.origin)) {
+        const absolute = toAbsolute(targetUrl, locationHeader);
+        headers.set("location", `${workerUrl.origin}/${absolute}`);
       }
 
-      // HTML + dynamic JS injection
+      const contentType = headers.get("content-type") || "";
+
+      if (!contentType.includes("text/html")) {
+        return new Response(response.body,{
+          status:response.status,
+          headers
+        });
+      }
+
       const rewriter = new HTMLRewriter()
-        .on("a", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("img", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("script", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("link", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("form", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("iframe", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("source", new AttributeRewriter(workerUrl.origin,targetUrl))
-        .on("head",{element(el){ el.append(`<script>${getInjectedJS()}</script>`,{html:true}) }});
+        .on("*", new AttributeRewriter(workerUrl.origin,targetUrl))
+        .on("head",{
+          element(el){
+            el.append(
+              `<script>${getInjectedJS()}</script>`,
+              {html:true}
+            );
+          }
+        });
 
-      return rewriter.transform(new Response(response.body,{status:response.status,headers}));
+      return rewriter.transform(
+        new Response(response.body,{
+          status:response.status,
+          headers
+        })
+      );
 
-    } catch(err){
+    } catch(err) {
       return new Response("Proxy error: "+err.message,{status:500});
     }
   }
